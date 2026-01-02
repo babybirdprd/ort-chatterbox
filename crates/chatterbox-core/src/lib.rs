@@ -36,5 +36,5 @@ pub mod voices;
 // Re-exports for convenience
 pub use config::{Config, ConfigBuilder, Device, GenerateOptions, ModelDtype, StreamMode};
 pub use error::{Error, Result};
-pub use inference::ChatterboxTTS;
+pub use inference::{ChatterboxTTS, StreamEvent};
 pub use voices::VoiceCache;

@@ -1,0 +1,28 @@
+[application]
+name = "Chatterbox"
+default_platform = "desktop"
+
+[desktop]
+enable_default_menu_bar = false
+
+[desktop.window]
+title = "Chatterbox TTS"
+width = 1000
+height = 700
+resizable = true
+decorations = true
+
+[web.app]
+title = "Chatterbox TTS"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+# Tailwind configuration
+[css]
+tailwind = { input = "input.css", output = "assets/tailwind.css" }
+
+[bundle]
+identifier = "com.chatterbox.launcher"
+publisher = "Chatterbox"
