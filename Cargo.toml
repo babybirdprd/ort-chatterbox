@@ -1,14 +1,32 @@
-[package]
-name = "chatterbox_ort"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/yourusername/chatterbox-ort"
 
-[dependencies]
-anyhow = "1.0"
-ort = { version = "2.0.0-rc.10", features = ["cuda", "download-binaries", "ndarray", "half"] }
+[workspace.dependencies]
+# Core inference
+ort = { version = "2.0.0-rc.10", features = ["download-binaries", "ndarray", "half"] }
 ndarray = "0.16"
+half = { version = "2.7", features = ["std"] }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
 hf-hub = "0.4"
 tokenizers = "0.21"
+
+# Audio
 hound = "3.5"
-rubato = "0.14" # For potential resampling if needed, though sample rate is 24k
-half = { version = "2.7.1", features = ["std"] }
+rubato = "0.14"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

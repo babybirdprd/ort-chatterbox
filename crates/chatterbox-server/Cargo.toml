@@ -1,0 +1,19 @@
+[package]
+name = "chatterbox-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP server for Chatterbox TTS with streaming support"
+
+[[bin]]
+name = "chatterbox-server"
+path = "src/main.rs"
+
+[dependencies]
+chatterbox-core = { path = "../chatterbox-core" }
+axum = { version = "0.7", features = ["multipart"] }
+tokio.workspace = true
+tower-http = { version = "0.5", features = ["cors"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "chatterbox-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for Chatterbox TTS"
+
+[[bin]]
+name = "chatterbox"
+path = "src/main.rs"
+
+[dependencies]
+chatterbox-core = { path = "../chatterbox-core" }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
