@@ -60,7 +60,7 @@ pub fn run_inference() -> Result<()> {
         .commit_from_file(&model_paths.conditional_decoder)?;
 
     // --- INPUT DATA ---
-    let text = "Oh, that's hilarious! [chuckle] Um anyway, how are you doing today?";
+    let text = "Oh, that's hilarious! Um anyway, how are you doing today?";
     let ref_audio_path = if std::path::Path::new("voice_input.wav").exists() {
         "voice_input.wav"
     } else {
@@ -163,17 +163,13 @@ pub fn run_inference() -> Result<()> {
 
     let mut generate_tokens = Array2::<i64>::from_elem((1, 1), START_SPEECH_TOKEN);
 
-    // Inspect and store expected input types
-    println!("\\nLanguage model expected input types:");
+    // Inspect and store expected input types for dynamic dtype handling
     let mut input_is_f16: HashMap<String, bool> = HashMap::new();
     for input in language_model.inputs.iter() {
-        // Check if input type string contains "float16"
         let type_str = format!("{:?}", input.input_type);
         let is_f16 = type_str.contains("Float16");
         input_is_f16.insert(input.name.clone(), is_f16);
-        println!("  Name: '{}' is_f16: {}", input.name, is_f16);
     }
-    println!();
 
     println!("Starting generation loop...");
     let max_new_tokens = 1024;
