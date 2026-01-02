@@ -5,9 +5,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-ort = { version = "2.0.0-rc.9", features = ["cuda", "download-binaries", "ndarray"] }
+ort = { version = "2.0.0-rc.10", features = ["cuda", "download-binaries", "ndarray", "half"] }
 ndarray = "0.16"
-hf-hub = "0.3"
-tokenizers = "0.19"
+hf-hub = "0.4"
+tokenizers = "0.21"
 hound = "3.5"
 rubato = "0.14" # For potential resampling if needed, though sample rate is 24k
+half = { version = "2.7.1", features = ["std"] }

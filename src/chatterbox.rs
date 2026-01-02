@@ -1,4 +1,5 @@
 use anyhow::Result;
+use half::f16;
 use hf_hub::{api::sync::Api, Repo, RepoType};
 use hound;
 use ndarray::{concatenate, s, Array, Array1, Array2, Array4, ArrayD, Axis};
@@ -10,7 +11,7 @@ use ort::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokenizers::Tokenizer;
+use tokenizers::Tokenizer; // Added import
 
 // --- CONSTANTS ---
 const MODEL_REPO: &str = "ResembleAI/chatterbox-turbo-ONNX";
@@ -20,7 +21,7 @@ const STOP_SPEECH_TOKEN: i64 = 6562;
 const SILENCE_TOKEN: i64 = 4299;
 const NUM_KV_HEADS: usize = 16;
 const HEAD_DIM: usize = 64;
-const MODEL_DTYPE: &str = "q8";
+const MODEL_DTYPE: &str = "fp16";
 
 pub fn run_inference() -> Result<()> {
     // Initialize ORT with CUDA
@@ -36,9 +37,12 @@ pub fn run_inference() -> Result<()> {
     let model_paths = download_models(MODEL_DTYPE)?;
 
     // 2. Load Tokenizer
+    println!("Initializing API for tokenizer...");
     let api = Api::new()?;
     let repo = api.repo(Repo::new(MODEL_REPO.to_string(), RepoType::Model));
+    println!("Fetching tokenizer.json...");
     let tokenizer_path = repo.get("tokenizer.json")?;
+    println!("Tokenizer fetched at {:?}", tokenizer_path);
     let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| anyhow::anyhow!(e))?;
 
     // 3. Create Sessions
@@ -87,32 +91,54 @@ pub fn run_inference() -> Result<()> {
 
     // 6. Run Speech Encoder
     // Explicitly create Values to avoid inputs! macro issues with Views
-    let audio_val_ort = Value::from_array(audio_values.insert_axis(Axis(0)).into_dyn())?;
+    // Convert audio to fp16 if using fp16 model
+    let audio_with_batch = audio_values.insert_axis(Axis(0));
+    let audio_val_ort = Value::from_array(audio_with_batch.into_dyn())?;
+
     let outputs = speech_encoder.run(inputs!["audio_values" => audio_val_ort])?;
 
-    // Helper to extract tensor and convert to ArrayD
-    // Shape usually implements AsSlice<usize> or similar, or we can just debug it.
-    // Assuming `try_extract_tensor` returns (Shape, &[T]). Shape might be `Vec<usize>` or specialized struct.
-    // If struct, `to_vec()` should work if it implements appropriate traits.
-    // Let's rely on standard `to_vec()` or iteration.
-    let (s, d) = outputs["conditional_embedding"].try_extract_tensor::<f32>()?;
-    let cond_emb = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
+    // Helper to extract fp16 tensor and convert to f32 ArrayD
+    let extract_f32_tensor = |val: &Value, name: &str| -> Result<ArrayD<f32>> {
+        // In fp16 mode, model outputs are f16, try that first
+        if MODEL_DTYPE == "fp16" {
+            if let Ok((s, d)) = val.try_extract_tensor::<f16>() {
+                let f32_data: Vec<f32> = d.iter().map(|x| x.to_f32()).collect();
+                return Ok(ArrayD::from_shape_vec(shape_to_vec(&s), f32_data)?);
+            }
+        }
+        // Fallback to f32
+        let (s, d) = val
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow::anyhow!("Failed to extract {} as f32: {}", name, e))?;
+        Ok(ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?)
+    };
 
-    let (s, d) = outputs["prompt_token"].try_extract_tensor::<i64>()?;
+    let cond_emb = extract_f32_tensor(&outputs["audio_features"], "audio_features")?;
+
+    let (s, d) = outputs["audio_tokens"].try_extract_tensor::<i64>()?;
     let prompt_token = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
 
-    let (s, d) = outputs["speaker_embeddings"].try_extract_tensor::<f32>()?;
-    let speaker_embeddings = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
+    let speaker_embeddings =
+        extract_f32_tensor(&outputs["speaker_embeddings"], "speaker_embeddings")?;
+    let speaker_features = extract_f32_tensor(&outputs["speaker_features"], "speaker_features")?;
 
-    let (s, d) = outputs["speaker_features"].try_extract_tensor::<f32>()?;
-    let speaker_features = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
+    // Helper to extract embeddings (works for both f16 and f32 models)
+    let extract_embeds_tensor = |val: &Value| -> Result<ArrayD<f32>> {
+        if MODEL_DTYPE == "fp16" {
+            if let Ok((s, d)) = val.try_extract_tensor::<f16>() {
+                let f32_data: Vec<f32> = d.iter().map(|x| x.to_f32()).collect();
+                return Ok(ArrayD::from_shape_vec(shape_to_vec(&s), f32_data)?);
+            }
+        }
+        let (s, d) = val.try_extract_tensor::<f32>()?;
+        Ok(ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?)
+    };
 
     // 7. Initial Embeddings
     let text_embeds = {
         let input_ids_ort = Value::from_array(input_ids.to_owned().into_dyn())?;
         let outputs = embed_tokens.run(inputs!["input_ids" => input_ids_ort])?;
-        let (s, d) = outputs["inputs_embeds"].try_extract_tensor::<f32>()?;
-        ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?
+        extract_embeds_tensor(&outputs["inputs_embeds"])?
     };
 
     // Concatenate cond_emb and inputs_embeds along axis 1
@@ -137,18 +163,41 @@ pub fn run_inference() -> Result<()> {
 
     let mut generate_tokens = Array2::<i64>::from_elem((1, 1), START_SPEECH_TOKEN);
 
+    // Inspect and store expected input types
+    println!("\\nLanguage model expected input types:");
+    let mut input_is_f16: HashMap<String, bool> = HashMap::new();
+    for input in language_model.inputs.iter() {
+        // Check if input type string contains "float16"
+        let type_str = format!("{:?}", input.input_type);
+        let is_f16 = type_str.contains("Float16");
+        input_is_f16.insert(input.name.clone(), is_f16);
+        println!("  Name: '{}' is_f16: {}", input.name, is_f16);
+    }
+    println!();
+
     println!("Starting generation loop...");
     let max_new_tokens = 1024;
 
+    // Helper for tensor creation with dynamic dtype
+    let make_tensor = |arr: &ArrayD<f32>, is_f16: bool| -> Result<Value> {
+        if is_f16 {
+            let arr_f16 = arr.mapv(|x| f16::from_f32(x));
+            Ok(Value::from_array(arr_f16)?.into_dyn())
+        } else {
+            Ok(Value::from_array(arr.to_owned())?.into_dyn())
+        }
+    };
+
     for _i in 0..max_new_tokens {
-        // Use Vec<(Cow, SessionInputValue)> to handle mixed types (casted to dynamic)
+        // Use Vec<(Cow, SessionInputValue)> to handle mixed types
         let mut dynamic_inputs: Vec<(std::borrow::Cow<'_, str>, SessionInputValue<'_>)> =
             Vec::new();
 
-        // Cast typed Values to dynamic Values using .into_dyn() (logic assumed based on typical ort patterns)
+        // inputs_embeds - check model metadata for expected dtype
+        let embeds_is_f16 = *input_is_f16.get("inputs_embeds").unwrap_or(&false);
         dynamic_inputs.push((
             "inputs_embeds".into(),
-            Value::from_array(inputs_embeds.to_owned().into_dyn())?.into(),
+            make_tensor(&inputs_embeds.clone().into_dyn(), embeds_is_f16)?.into(),
         ));
         dynamic_inputs.push((
             "attention_mask".into(),
@@ -159,15 +208,18 @@ pub fn run_inference() -> Result<()> {
             Value::from_array(position_ids.to_owned().into_dyn())?.into(),
         ));
 
+        // past_key_values - check model metadata for expected dtype
         for (k, v) in &past_key_values {
+            let is_f16 = *input_is_f16.get(k).unwrap_or(&false);
             dynamic_inputs.push((
                 k.clone().into(),
-                Value::from_array(v.to_owned().into_dyn())?.into(),
+                make_tensor(&v.clone().into_dyn(), is_f16)?.into(),
             ));
         }
 
         let outputs = language_model.run(dynamic_inputs)?;
 
+        // Extract logits - always f32 (model outputs f32 even with fp16 internals)
         let (s, d) = outputs["logits"].try_extract_tensor::<f32>()?;
         let logits = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
 
@@ -190,8 +242,7 @@ pub fn run_inference() -> Result<()> {
         // --- Prepare for Next Step ---
         let next_token_ort = Value::from_array(next_token.to_owned().into_dyn())?;
         let outputs_embed = embed_tokens.run(inputs!["input_ids" => next_token_ort])?;
-        let (s, d) = outputs_embed["inputs_embeds"].try_extract_tensor::<f32>()?;
-        inputs_embeds = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?
+        inputs_embeds = extract_embeds_tensor(&outputs_embed["inputs_embeds"])?
             .into_dimensionality::<ndarray::Ix3>()?;
 
         let ones = Array2::<i64>::ones((batch_size, 1));
@@ -206,14 +257,22 @@ pub fn run_inference() -> Result<()> {
         for (input_name, cache_tensor) in past_key_values.iter_mut() {
             let output_name = input_name.replace("past_key_values", "present");
             if let Some(val) = outputs.get(&output_name) {
-                let (s, d) = val.try_extract_tensor::<f32>()?;
+                // Extract present state - f16 for fp16 models (matches past_key_values input dtype)
+                let is_f16 = *input_is_f16.get(input_name).unwrap_or(&false);
+                let (s_vec, data) = if is_f16 {
+                    let (s, d) = val.try_extract_tensor::<f16>()?;
+                    (
+                        shape_to_vec(&s),
+                        d.iter().map(|x| x.to_f32()).collect::<Vec<f32>>(),
+                    )
+                } else {
+                    let (s, d) = val.try_extract_tensor::<f32>()?;
+                    (shape_to_vec(&s), d.to_vec())
+                };
                 // We know cache is 4D
-                let s_vec = shape_to_vec(&s);
                 if s_vec.len() == 4 {
-                    let tensor = Array4::from_shape_vec(
-                        (s_vec[0], s_vec[1], s_vec[2], s_vec[3]),
-                        d.to_vec(),
-                    )?;
+                    let tensor =
+                        Array4::from_shape_vec((s_vec[0], s_vec[1], s_vec[2], s_vec[3]), data)?;
                     *cache_tensor = tensor;
                 }
             }
@@ -309,9 +368,9 @@ fn download_models(dtype: &str) -> Result<ModelPaths> {
     println!("Checking/Downloading models (dtype={}) from HF...", dtype);
     let get_model = |name: &str| -> Result<PathBuf> {
         let suffix = match dtype {
-            "fp32" => "",
-            "q8" => "_quantized",
-            other => other,
+            "fp32" => "".to_string(),
+            "q8" => "_quantized".to_string(),
+            val => format!("_{}", val),
         };
         let filename = format!("{}{}.onnx", name, suffix);
         println!("Fetching {}...", filename);
