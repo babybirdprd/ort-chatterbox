@@ -1,0 +1,13 @@
+[package]
+name = "chatterbox_ort"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+ort = { version = "2.0.0-rc.9", features = ["cuda", "download-binaries", "ndarray"] }
+ndarray = "0.16"
+hf-hub = "0.3"
+tokenizers = "0.19"
+hound = "3.5"
+rubato = "0.14" # For potential resampling if needed, though sample rate is 24k
