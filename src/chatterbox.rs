@@ -60,7 +60,7 @@ pub fn run_inference() -> Result<()> {
         .commit_from_file(&model_paths.conditional_decoder)?;
 
     // --- INPUT DATA ---
-    let text = "Oh, that's hilarious! Um anyway, how are you doing today?";
+    let text = "Oh, that's hilarious! [chuckle] Um anyway, how are you doing today?";
     let ref_audio_path = if std::path::Path::new("voice_input.wav").exists() {
         "voice_input.wav"
     } else {
@@ -219,9 +219,24 @@ pub fn run_inference() -> Result<()> {
         let (s, d) = outputs["logits"].try_extract_tensor::<f32>()?;
         let logits = ArrayD::from_shape_vec(shape_to_vec(&s), d.to_vec())?;
 
-        let last_logits = logits.slice(s![.., -1, ..]);
-        let next_token_id = last_logits
-            .mapv(|x| x)
+        let last_logits = logits.slice(s![.., -1, ..]).to_owned();
+
+        // Apply repetition penalty to discourage repeating already-generated tokens
+        const REPETITION_PENALTY: f32 = 1.2;
+        let mut penalized_logits = last_logits.clone().into_dimensionality::<ndarray::Ix2>()?;
+        for &token_id in generate_tokens.iter() {
+            if token_id >= 0 && (token_id as usize) < penalized_logits.shape()[1] {
+                let score = penalized_logits[[0, token_id as usize]];
+                // Apply penalty: if score < 0, multiply by penalty; if score > 0, divide by penalty
+                penalized_logits[[0, token_id as usize]] = if score < 0.0 {
+                    score * REPETITION_PENALTY
+                } else {
+                    score / REPETITION_PENALTY
+                };
+            }
+        }
+
+        let next_token_id = penalized_logits
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
