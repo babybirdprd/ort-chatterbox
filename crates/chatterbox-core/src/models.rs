@@ -72,20 +72,8 @@ pub struct ModelSessions {
 
 /// Create ONNX Runtime sessions for all models.
 pub fn create_sessions(paths: &ModelPaths, config: &Config) -> Result<ModelSessions> {
-    // Initialize ORT with execution providers
-    let mut builder = ort::init().with_name("chatterbox");
-
-    #[cfg(feature = "directml")]
-    if let Device::DirectML(_device_id) = config.device {
-        builder = builder.with_execution_providers([DirectMLExecutionProvider::default().build()]);
-    }
-
-    #[cfg(feature = "cuda")]
-    if let Device::Cuda(_device_id) = config.device {
-        builder = builder.with_execution_providers([CUDAExecutionProvider::default().build()]);
-    }
-
-    builder.commit()?;
+    // Initialize ORT (don't register providers globally - do per-session instead)
+    ort::init().with_name("chatterbox").commit()?;
 
     let build_session = |path: &PathBuf| -> Result<Session> {
         let mut session_builder = Session::builder()?;
