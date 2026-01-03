@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
-use chatterbox_core::{ChatterboxTTS, Config, Device, GenerateOptions, StreamEvent};
+use chatterbox_core::{ChatterboxTTS, ChunkEvent, Config, Device, GenerateOptions};
 
 use crate::state::{AppState, GenerationStatus};
 
@@ -42,6 +42,12 @@ pub enum WorkerEvent {
     VoiceRemoved { id: String },
     /// A token was generated
     TokenGenerated { count: usize },
+    /// Chunk progress for chunked generation
+    ChunkProgress {
+        current_chunk: usize,
+        total_chunks: usize,
+        chunk_text: String,
+    },
     /// Generation complete
     GenerationComplete { audio: Vec<f32> },
     /// An error occurred
@@ -133,18 +139,38 @@ pub fn spawn_worker() -> anyhow::Result<(
                     };
 
                     let event_tx_clone = event_tx.clone();
-                    let mut token_count = 0;
 
-                    println!("[Worker] Calling tts.generate_streaming()...");
-                    match tts.generate_streaming(&text, &voice_id, opts, |event| {
-                        if let StreamEvent::Token(_) = event {
-                            token_count += 1;
-                            // Send progress every 10 tokens
-                            if token_count % 10 == 0 {
-                                println!("[Worker] Generated {} tokens", token_count);
-                                let _ = event_tx_clone
-                                    .send(WorkerEvent::TokenGenerated { count: token_count });
-                            }
+                    println!("[Worker] Calling tts.generate_chunked()...");
+                    match tts.generate_chunked(&text, &voice_id, opts, |event| match event {
+                        ChunkEvent::ChunkStarted { index, total, text } => {
+                            println!(
+                                "[Worker] Starting chunk {}/{}: {}",
+                                index + 1,
+                                total,
+                                if text.len() > 50 {
+                                    format!("{}...", &text[..50])
+                                } else {
+                                    text.clone()
+                                }
+                            );
+                            let _ = event_tx_clone.send(WorkerEvent::ChunkProgress {
+                                current_chunk: index + 1,
+                                total_chunks: total,
+                                chunk_text: text,
+                            });
+                        }
+                        ChunkEvent::ChunkComplete {
+                            index,
+                            total,
+                            audio,
+                        } => {
+                            println!(
+                                "[Worker] Chunk {}/{} complete: {} samples ({:.1}s)",
+                                index + 1,
+                                total,
+                                audio.len(),
+                                audio.len() as f32 / 24000.0
+                            );
                         }
                     }) {
                         Ok(audio) => {
@@ -190,6 +216,16 @@ pub fn handle_event(state: &mut Signal<AppState>, event: WorkerEvent) {
             state.write().generation_status = GenerationStatus::Generating {
                 tokens_generated: count,
                 max_tokens,
+            };
+        }
+        WorkerEvent::ChunkProgress {
+            current_chunk,
+            total_chunks,
+            chunk_text: _,
+        } => {
+            state.write().generation_status = GenerationStatus::GeneratingChunked {
+                current_chunk,
+                total_chunks,
             };
         }
         WorkerEvent::GenerationComplete { audio } => {

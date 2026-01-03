@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub fn HistoryPanel(state: Signal<AppState>) -> Element {
     let history = state.read().history.clone();
     let selected = state.read().selected_history_item.clone();
+    let currently_playing = state.read().currently_playing_id.clone();
 
     rsx! {
         div { class: "glass-card p-4",
@@ -33,6 +34,7 @@ pub fn HistoryPanel(state: Signal<AppState>) -> Element {
                         HistoryItem {
                             item: item.clone(),
                             is_selected: selected.as_ref() == Some(&item.id),
+                            is_playing: currently_playing.as_ref() == Some(&item.id),
                             on_select: move |id: String| {
                                 // Load this item into the player
                                 let item = state.read().history.iter()
@@ -49,7 +51,26 @@ pub fn HistoryPanel(state: Signal<AppState>) -> Element {
                                 if state.read().selected_history_item.as_ref() == Some(&id) {
                                     state.write().selected_history_item = None;
                                 }
-                                // TODO: Also delete file from disk
+                                // Stop playback if this item was playing
+                                if state.read().currently_playing_id.as_ref() == Some(&id) {
+                                    state.write().currently_playing_id = None;
+                                }
+                            },
+                            on_play: move |(id, samples): (String, Vec<f32>)| {
+                                let is_currently_playing = state.read().currently_playing_id.as_ref() == Some(&id);
+                                
+                                if is_currently_playing {
+                                    // Stop playback
+                                    state.write().currently_playing_id = None;
+                                } else {
+                                    // Start playback
+                                    state.write().currently_playing_id = Some(id.clone());
+                                    
+                                    spawn(async move {
+                                        play_audio_samples(&samples).await;
+                                        state.write().currently_playing_id = None;
+                                    });
+                                }
                             }
                         }
                     }
@@ -59,15 +80,32 @@ pub fn HistoryPanel(state: Signal<AppState>) -> Element {
     }
 }
 
+async fn play_audio_samples(samples: &[f32]) {
+    use rodio::{OutputStream, Source};
+    use std::time::Duration;
+
+    if let Ok((_stream, handle)) = OutputStream::try_default() {
+        let source = rodio::buffer::SamplesBuffer::new(1, 24000, samples.to_vec());
+        if handle.play_raw(source.convert_samples()).is_ok() {
+            let duration = samples.len() as f32 / 24000.0;
+            tokio::time::sleep(Duration::from_secs_f32(duration)).await;
+        }
+    }
+}
+
 #[component]
 fn HistoryItem(
     item: GeneratedAudio,
     is_selected: bool,
+    is_playing: bool,
     on_select: EventHandler<String>,
     on_delete: EventHandler<String>,
+    on_play: EventHandler<(String, Vec<f32>)>,
 ) -> Element {
     let id = item.id.clone();
     let id_for_delete = item.id.clone();
+    let id_for_play = item.id.clone();
+    let samples_for_play = item.samples.clone();
     let truncated_text = if item.text.len() > 30 {
         format!("{}...", &item.text[..30])
     } else {
@@ -83,9 +121,14 @@ fn HistoryItem(
             },
             onclick: move |_| on_select.call(id.clone()),
 
-            // Icon
-            div { class: "w-8 h-8 rounded-lg bg-accent-500/20 flex items-center justify-center text-accent-400 text-sm",
-                "🎵"
+            // Play button (replaces static icon)
+            button {
+                class: "w-8 h-8 rounded-lg bg-accent-500/20 flex items-center justify-center text-accent-400 text-sm hover:bg-accent-500/40 transition-colors",
+                onclick: move |e| {
+                    e.stop_propagation();
+                    on_play.call((id_for_play.clone(), samples_for_play.clone()));
+                },
+                if is_playing { "⏸" } else { "▶" }
             }
 
             // Info

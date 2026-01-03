@@ -35,6 +35,11 @@ pub enum GenerationStatus {
         tokens_generated: usize,
         max_tokens: usize,
     },
+    /// Chunked generation mode (sentence-by-sentence)
+    GeneratingChunked {
+        current_chunk: usize,
+        total_chunks: usize,
+    },
     Complete,
     Error(String),
 }
@@ -48,6 +53,8 @@ pub struct AppState {
 
     // Text input
     pub text: String,
+    /// Cursor position in text for tag insertion (None = end of text)
+    pub text_cursor_position: Option<usize>,
 
     // Settings
     pub temperature: f32,
@@ -62,6 +69,8 @@ pub struct AppState {
     // Generation history
     pub history: Vec<GeneratedAudio>,
     pub selected_history_item: Option<String>,
+    /// ID of the history item currently playing (for inline play buttons)
+    pub currently_playing_id: Option<String>,
 
     // Output directory for auto-save
     pub output_dir: Option<PathBuf>,

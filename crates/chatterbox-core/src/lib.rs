@@ -31,10 +31,12 @@ pub mod config;
 pub mod error;
 pub mod inference;
 pub mod models;
+pub mod text;
 pub mod voices;
 
 // Re-exports for convenience
 pub use config::{Config, ConfigBuilder, Device, GenerateOptions, ModelDtype, StreamMode};
 pub use error::{Error, Result};
-pub use inference::{ChatterboxTTS, StreamEvent};
+pub use inference::{ChatterboxTTS, ChunkEvent, StreamEvent};
+pub use text::split_by_sentence;
 pub use voices::VoiceCache;

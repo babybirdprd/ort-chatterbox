@@ -1,6 +1,6 @@
 //! Build script to copy ONNX Runtime and cuDNN libraries.
 //!
-//! Automatically downloads cuDNN if CUDA feature is enabled and cuDNN is not found.
+//! Automatically downloads cuDNN if CUDA feature is enabled and cuDNN isn't found.
 
 use std::env;
 use std::fs::{self, File};
@@ -103,13 +103,21 @@ fn main() {
 
         let platform_cache = ort_cache.join(platform);
         if platform_cache.exists() {
-            // Find the most recent version directory
+            // Find ALL version directories and add their lib paths
             if let Ok(entries) = fs::read_dir(&platform_cache) {
                 for entry in entries.flatten() {
                     let lib_dir = entry.path().join("onnxruntime").join("lib");
                     if lib_dir.exists() {
-                        println!("cargo:warning=Found ORT cache: {}", lib_dir.display());
-                        search_paths.push(lib_dir);
+                        // Verify the lib directory has DLLs
+                        let has_dlls = fs::read_dir(&lib_dir)
+                            .map(|rd| rd.flatten().any(|e| {
+                                e.path().extension().map(|ext| ext == "dll" || ext == "so" || ext == "dylib").unwrap_or(false)
+                            }))
+                            .unwrap_or(false);
+                        if has_dlls {
+                            println!("cargo:warning=Found ORT cache with libs: {}", lib_dir.display());
+                            search_paths.push(lib_dir);
+                        }
                     }
                 }
             }
@@ -181,11 +189,19 @@ fn get_dx_output_dir(profile: &str) -> Option<PathBuf> {
         .join(if cfg!(windows) { "windows" } else { "linux" })
         .join("app");
 
-    if dx_output.exists() {
-        Some(dx_output)
-    } else {
-        None
+    // Create the directory if it doesn't exist (important after cargo clean)
+    if !dx_output.exists() {
+        if let Err(e) = fs::create_dir_all(&dx_output) {
+            println!("cargo:warning=Failed to create dx output dir: {}", e);
+            return None;
+        }
+        println!(
+            "cargo:warning=Created dx output dir: {}",
+            dx_output.display()
+        );
     }
+
+    Some(dx_output)
 }
 
 fn get_cudnn_cache_dir() -> PathBuf {

@@ -24,8 +24,15 @@ pub fn TagButtons(state: Signal<AppState>) -> Element {
                 button {
                     class: "tag-btn flex items-center gap-1.5",
                     onclick: move |_| {
-                        let current = state.read().text.clone();
-                        state.write().text = format!("{} {}", current, tag);
+                        let text = state.read().text.clone();
+                        let cursor_pos = state.read().text_cursor_position.unwrap_or(text.len());
+                        // Clamp cursor position to valid range
+                        let pos = cursor_pos.min(text.len());
+                        // Insert tag at cursor position with space
+                        let new_text = format!("{}{} {}", &text[..pos], tag, &text[pos..]);
+                        let new_cursor = pos + tag.len() + 1; // Move cursor after inserted tag + space
+                        state.write().text = new_text;
+                        state.write().text_cursor_position = Some(new_cursor);
                     },
                     span { "{emoji}" }
                     span { "{tag}" }

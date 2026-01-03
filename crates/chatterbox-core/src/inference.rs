@@ -38,16 +38,14 @@ impl ChatterboxTTS {
     ///
     /// Downloads models if not cached, initializes ONNX sessions.
     pub fn new(mut config: Config) -> Result<Self> {
-        // Force FP32 for GPU execution (both DirectML and CUDA)
-        // FP16 can cause cuDNN failures on older GPUs (Pascal architecture like GTX 1050)
+        // Only force FP32 for DirectML (which has known FP16 compatibility issues)
+        // CUDA should use FP16 to fit in limited VRAM
         {
             use crate::config::Device;
-            let is_gpu = matches!(
-                config.device,
-                Device::DirectML(_) | Device::Cuda(_) | Device::Auto
-            );
-            if is_gpu && config.dtype == crate::config::ModelDtype::Fp16 {
-                println!("Note: GPU selected, switching to FP32 models for compatibility with older GPUs");
+            if matches!(config.device, Device::DirectML(_))
+                && config.dtype == crate::config::ModelDtype::Fp16
+            {
+                println!("Note: DirectML selected, switching to FP32 models for compatibility");
                 config.dtype = crate::config::ModelDtype::Fp32;
             }
         }
@@ -59,12 +57,12 @@ impl ChatterboxTTS {
         let tokenizer =
             Tokenizer::from_file(&paths.tokenizer).map_err(|e| Error::Tokenizer(e.to_string()))?;
 
-        println!("Creating ONNX sessions...");
-        let sessions = create_sessions(&paths, &config)?;
+        println!("Creating ONNX sessions (lazy loading)...");
+        let mut sessions = create_sessions(&paths, &config)?;
 
-        // Inspect LM inputs to determine which need f16
+        // Inspect LM inputs to determine which need f16 (this triggers lazy load of LM)
         let mut input_dtypes = HashMap::new();
-        for input in sessions.language_model.inputs.iter() {
+        for input in sessions.language_model()?.inputs.iter() {
             let type_str = format!("{:?}", input.input_type);
             let is_f16 = type_str.contains("Float16");
             input_dtypes.insert(input.name.clone(), is_f16);
@@ -158,10 +156,8 @@ impl ChatterboxTTS {
         let audio_with_batch = samples.clone().insert_axis(Axis(0));
         let audio_val = Value::from_array(audio_with_batch.into_dyn())?;
 
-        let outputs = self
-            .sessions
-            .speech_encoder
-            .run(inputs!["audio_values" => audio_val])?;
+        let speech_encoder = self.sessions.speech_encoder()?;
+        let outputs = speech_encoder.run(inputs!["audio_values" => audio_val])?;
 
         let cond_emb = extract_f32_tensor(&outputs["audio_features"], self.config.dtype)?;
         let speaker_embeddings =
@@ -201,10 +197,8 @@ impl ChatterboxTTS {
         // Get text embeddings - scoped to release borrow early
         let text_embeds = {
             let input_ids_ort = Value::from_array(input_ids.clone().into_dyn())?;
-            let embed_outputs = self
-                .sessions
-                .embed_tokens
-                .run(inputs!["input_ids" => input_ids_ort])?;
+            let embed_tokens = self.sessions.embed_tokens()?;
+            let embed_outputs = embed_tokens.run(inputs!["input_ids" => input_ids_ort])?;
             extract_f32_tensor(&embed_outputs["inputs_embeds"], self.config.dtype)?
         };
 
@@ -220,7 +214,7 @@ impl ChatterboxTTS {
         // Initialize KV cache
         let batch_size = 1;
         let mut past_key_values: HashMap<String, Array4<f32>> = HashMap::new();
-        for input in self.sessions.language_model.inputs.iter() {
+        for input in self.sessions.language_model()?.inputs.iter() {
             if input.name.contains("past_key_values") {
                 let cache = Array4::<f32>::zeros((batch_size, NUM_KV_HEADS, 0, HEAD_DIM));
                 past_key_values.insert(input.name.clone(), cache);
@@ -263,7 +257,8 @@ impl ChatterboxTTS {
                 ));
             }
 
-            let outputs = self.sessions.language_model.run(dynamic_inputs)?;
+            let lm = self.sessions.language_model()?;
+            let outputs = lm.run(dynamic_inputs)?;
 
             // Get logits and sample
             let (s, d) = outputs["logits"].try_extract_tensor::<f32>()?;
@@ -334,10 +329,8 @@ impl ChatterboxTTS {
             }
 
             let next_token_ort = Value::from_array(next_token.clone().into_dyn())?;
-            let embed_out = self
-                .sessions
-                .embed_tokens
-                .run(inputs!["input_ids" => next_token_ort])?;
+            let embed_tokens = self.sessions.embed_tokens()?;
+            let embed_out = embed_tokens.run(inputs!["input_ids" => next_token_ort])?;
             inputs_embeds = extract_f32_tensor(&embed_out["inputs_embeds"], dtype)?
                 .into_dimensionality::<ndarray::Ix3>()?;
 
@@ -365,7 +358,8 @@ impl ChatterboxTTS {
             &[prompt_token_2d.view(), speech_tokens.view(), silence.view()],
         )?;
 
-        let wav_output = self.sessions.conditional_decoder.run(inputs![
+        let decoder = self.sessions.conditional_decoder()?;
+        let wav_output = decoder.run(inputs![
             "speech_tokens" => Value::from_array(speech_input.into_dyn())?,
             "speaker_embeddings" => Value::from_array(voice.speaker_embeddings.clone())?,
             "speaker_features" => Value::from_array(voice.speaker_features.clone())?
@@ -376,6 +370,102 @@ impl ChatterboxTTS {
 
         Ok(wav.into_raw_vec_and_offset().0)
     }
+
+    /// Generate speech by processing text in sentence chunks.
+    ///
+    /// This method splits long text into sentences and generates audio for each
+    /// chunk separately. This bounds memory usage regardless of text length,
+    /// making it suitable for systems with limited VRAM.
+    ///
+    /// # Arguments
+    /// * `text` - The text to synthesize
+    /// * `voice_id` - ID of a previously added voice
+    /// * `opts` - Generation options (max_tokens applies per-chunk)
+    /// * `callback` - Called with progress events for each chunk
+    ///
+    /// # Returns
+    /// Concatenated audio samples for all chunks
+    pub fn generate_chunked<F>(
+        &mut self,
+        text: &str,
+        voice_id: &str,
+        opts: GenerateOptions,
+        mut callback: F,
+    ) -> Result<Vec<f32>>
+    where
+        F: FnMut(ChunkEvent),
+    {
+        let voice = self
+            .voice_cache
+            .get(voice_id)
+            .ok_or_else(|| Error::VoiceNotFound(voice_id.to_string()))?
+            .clone();
+
+        let sentences = crate::text::split_by_sentence(text);
+
+        // Handle empty or single-sentence case
+        if sentences.is_empty() {
+            return Ok(vec![]);
+        }
+
+        if sentences.len() == 1 {
+            callback(ChunkEvent::ChunkStarted {
+                index: 0,
+                total: 1,
+                text: sentences[0].clone(),
+            });
+            let audio =
+                self.generate_with_embedding(&sentences[0], &voice, opts.clone(), &mut |_| {})?;
+            callback(ChunkEvent::ChunkComplete {
+                index: 0,
+                total: 1,
+                audio: audio.clone(),
+            });
+            return Ok(audio);
+        }
+
+        let total = sentences.len();
+        let mut all_audio = Vec::new();
+
+        for (index, sentence) in sentences.iter().enumerate() {
+            callback(ChunkEvent::ChunkStarted {
+                index,
+                total,
+                text: sentence.clone(),
+            });
+
+            // Generate this chunk
+            let chunk_audio =
+                self.generate_with_embedding(sentence, &voice, opts.clone(), &mut |_| {})?;
+
+            callback(ChunkEvent::ChunkComplete {
+                index,
+                total,
+                audio: chunk_audio.clone(),
+            });
+
+            all_audio.extend(chunk_audio);
+        }
+
+        Ok(all_audio)
+    }
+}
+
+/// Events emitted during chunked generation.
+#[derive(Debug, Clone)]
+pub enum ChunkEvent {
+    /// A sentence chunk started processing
+    ChunkStarted {
+        index: usize,
+        total: usize,
+        text: String,
+    },
+    /// A sentence chunk completed
+    ChunkComplete {
+        index: usize,
+        total: usize,
+        audio: Vec<f32>,
+    },
 }
 
 /// Events emitted during streaming generation.
