@@ -9,6 +9,9 @@ use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 use ort::execution_providers::CUDAExecutionProvider;
 
+#[cfg(feature = "directml")]
+use ort::execution_providers::DirectMLExecutionProvider;
+
 /// HuggingFace model repository ID.
 pub const MODEL_REPO: &str = "ResembleAI/chatterbox-turbo-ONNX";
 
@@ -69,8 +72,13 @@ pub struct ModelSessions {
 
 /// Create ONNX Runtime sessions for all models.
 pub fn create_sessions(paths: &ModelPaths, config: &Config) -> Result<ModelSessions> {
-    // Initialize ORT
+    // Initialize ORT with execution providers
     let mut builder = ort::init().with_name("chatterbox");
+
+    #[cfg(feature = "directml")]
+    if let Device::DirectML(_device_id) = config.device {
+        builder = builder.with_execution_providers([DirectMLExecutionProvider::default().build()]);
+    }
 
     #[cfg(feature = "cuda")]
     if let Device::Cuda(_device_id) = config.device {
@@ -81,6 +89,12 @@ pub fn create_sessions(paths: &ModelPaths, config: &Config) -> Result<ModelSessi
 
     let build_session = |path: &PathBuf| -> Result<Session> {
         let mut session_builder = Session::builder()?;
+
+        #[cfg(feature = "directml")]
+        if let Device::DirectML(_) = config.device {
+            session_builder = session_builder
+                .with_execution_providers([DirectMLExecutionProvider::default().build()])?;
+        }
 
         #[cfg(feature = "cuda")]
         if let Device::Cuda(_) = config.device {

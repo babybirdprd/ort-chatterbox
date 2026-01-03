@@ -100,6 +100,11 @@ fn App() -> Element {
                 if matches!(state.read().generation_status, GenerationStatus::Generating { .. }) {
                     components::GenerationProgress { state }
                 }
+
+                // Generation history
+                if !state.read().history.is_empty() {
+                    components::HistoryPanel { state }
+                }
             }
         }
     }

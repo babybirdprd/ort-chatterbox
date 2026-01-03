@@ -13,6 +13,18 @@ pub struct Voice {
     pub path: PathBuf,
 }
 
+/// A generated audio item in history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedAudio {
+    pub id: String,
+    pub text: String,
+    pub voice_name: String,
+    pub samples: Vec<f32>,
+    pub duration_secs: f32,
+    pub file_path: Option<PathBuf>,
+    pub created_at: String,
+}
+
 /// Generation status.
 #[derive(Debug, Clone, Default)]
 pub enum GenerationStatus {
@@ -45,6 +57,14 @@ pub struct AppState {
     pub generation_status: GenerationStatus,
     pub output_audio: Option<Vec<f32>>,
     pub is_playing: bool,
+    pub playback_progress: f32, // 0.0 to 1.0
+
+    // Generation history
+    pub history: Vec<GeneratedAudio>,
+    pub selected_history_item: Option<String>,
+
+    // Output directory for auto-save
+    pub output_dir: Option<PathBuf>,
 
     // Worker communication (std channels for blocking TTS)
     pub worker_tx: Option<mpsc::Sender<WorkerCommand>>,
@@ -52,10 +72,26 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        // Default output directory
+        let output_dir = dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .map(|p| p.join("Chatterbox"));
+
         Self {
             temperature: 0.8,
             max_tokens: 1024,
+            output_dir,
             ..Default::default()
         }
+    }
+
+    /// Get the selected voice name for display
+    pub fn selected_voice_name(&self) -> Option<String> {
+        self.selected_voice.as_ref().and_then(|id| {
+            self.voices
+                .iter()
+                .find(|v| &v.id == id)
+                .map(|v| v.name.clone())
+        })
     }
 }

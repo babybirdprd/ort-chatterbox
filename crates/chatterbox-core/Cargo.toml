@@ -6,8 +6,9 @@ license.workspace = true
 description = "Core TTS inference library for Chatterbox Turbo using ONNX Runtime"
 
 [features]
-default = ["cuda"]
+default = ["cuda", "directml"]  # Both enabled - CUDA if cuDNN available, else DirectML fallback
 cuda = ["ort/cuda"]
+directml = ["ort/directml"]
 
 [dependencies]
 ort.workspace = true

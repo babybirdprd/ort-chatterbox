@@ -1,4 +1,4 @@
-//! Audio player component.
+//! Audio player component with real waveform and proper playback state.
 
 use crate::state::AppState;
 use dioxus::prelude::*;
@@ -12,6 +12,29 @@ pub fn AudioPlayer(state: Signal<AppState>) -> Element {
         .as_ref()
         .map(|a| a.len() as f32 / 24000.0)
         .unwrap_or(0.0);
+
+    // Calculate waveform bars from actual audio data
+    let waveform_heights: Vec<f32> = audio
+        .as_ref()
+        .map(|samples| {
+            // Downsample to 40 bars
+            let chunk_size = (samples.len() / 40).max(1);
+            (0..40)
+                .map(|i| {
+                    let start = i * chunk_size;
+                    let end = (start + chunk_size).min(samples.len());
+                    if start >= samples.len() {
+                        0.0
+                    } else {
+                        // Get RMS amplitude for this chunk
+                        let rms: f32 = samples[start..end].iter().map(|s| s * s).sum::<f32>()
+                            / (end - start) as f32;
+                        rms.sqrt().min(1.0)
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![0.0; 40]);
 
     rsx! {
         div { class: "glass-card p-4",
@@ -30,25 +53,36 @@ pub fn AudioPlayer(state: Signal<AppState>) -> Element {
                     onclick: move |_| {
                         let audio = state.read().output_audio.clone();
                         if let Some(samples) = audio {
-                            state.write().is_playing = !is_playing;
-
                             if !is_playing {
-                                // Play audio using rodio
+                                state.write().is_playing = true;
+
+                                // Play audio and reset state when done
                                 spawn(async move {
                                     play_audio(&samples).await;
+                                    state.write().is_playing = false;
                                 });
+                            } else {
+                                // Stop playback (just update state, audio will finish naturally)
+                                state.write().is_playing = false;
                             }
                         }
                     },
                     if is_playing { "⏸" } else { "▶" }
                 }
 
-                // Waveform visualization
-                div { class: "flex-1 h-12 flex items-center gap-0.5",
-                    for i in 0..40 {
-                        div {
-                            class: "waveform-bar",
-                            style: "animation-delay: {i * 50}ms; height: {20 + (i % 5) * 15}%;"
+                // Waveform visualization - real data, animated only when playing
+                div { class: "flex-1 h-12 flex items-end justify-center gap-0.5",
+                    for (i, height) in waveform_heights.iter().enumerate() {
+                        {
+                            let bar_height = (height * 100.0).max(10.0);
+                            let animation_class = if is_playing { "waveform-bar-playing" } else { "" };
+                            rsx! {
+                                div {
+                                    key: "{i}",
+                                    class: "w-1 bg-purple-500 rounded-full transition-all duration-100 {animation_class}",
+                                    style: "height: {bar_height}%; animation-delay: {i * 30}ms;"
+                                }
+                            }
                         }
                     }
                 }
@@ -88,7 +122,7 @@ async fn play_audio(samples: &[f32]) {
 
     if let Ok((_stream, handle)) = OutputStream::try_default() {
         let source = rodio::buffer::SamplesBuffer::new(1, 24000, samples.to_vec());
-        if let Ok(_) = handle.play_raw(source.convert_samples()) {
+        if handle.play_raw(source.convert_samples()).is_ok() {
             // Wait for playback to complete
             let duration = samples.len() as f32 / 24000.0;
             tokio::time::sleep(Duration::from_secs_f32(duration)).await;

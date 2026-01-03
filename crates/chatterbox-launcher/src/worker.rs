@@ -181,6 +181,31 @@ pub fn handle_event(state: &mut Signal<AppState>, event: WorkerEvent) {
             };
         }
         WorkerEvent::GenerationComplete { audio } => {
+            // Get info for history entry
+            let text = state.read().text.clone();
+            let voice_name = state
+                .read()
+                .selected_voice_name()
+                .unwrap_or_else(|| "Unknown".to_string());
+            let duration_secs = audio.len() as f32 / 24000.0;
+            let output_dir = state.read().output_dir.clone();
+
+            // Auto-save to disk
+            let file_path = crate::components::auto_save_audio(&audio, &text, &output_dir);
+
+            // Create history entry
+            let history_item = crate::state::GeneratedAudio {
+                id: format!("gen_{}", chrono::Utc::now().timestamp_millis()),
+                text: text.clone(),
+                voice_name,
+                samples: audio.clone(),
+                duration_secs,
+                file_path,
+                created_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+            };
+
+            // Update state
+            state.write().history.insert(0, history_item); // Newest first
             state.write().output_audio = Some(audio);
             state.write().generation_status = GenerationStatus::Complete;
         }

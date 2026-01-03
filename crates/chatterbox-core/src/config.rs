@@ -8,18 +8,26 @@ use std::path::PathBuf;
 pub enum Device {
     /// CPU-only inference (always available)
     Cpu,
-    /// CUDA GPU inference (requires `cuda` feature)
+    /// CUDA GPU inference (requires `cuda` feature and cuDNN)
     #[cfg(feature = "cuda")]
     Cuda(u32),
+    /// DirectML GPU inference (Windows only, no CUDA needed)
+    #[cfg(feature = "directml")]
+    DirectML(u32),
 }
 
 impl Default for Device {
     fn default() -> Self {
-        #[cfg(feature = "cuda")]
+        // Prefer DirectML on Windows (no cuDNN needed), then CUDA, then CPU
+        #[cfg(feature = "directml")]
+        {
+            Device::DirectML(0)
+        }
+        #[cfg(all(feature = "cuda", not(feature = "directml")))]
         {
             Device::Cuda(0)
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "directml")))]
         {
             Device::Cpu
         }
