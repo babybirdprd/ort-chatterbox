@@ -72,25 +72,49 @@ pub struct ModelSessions {
 
 /// Create ONNX Runtime sessions for all models.
 pub fn create_sessions(paths: &ModelPaths, config: &Config) -> Result<ModelSessions> {
-    // Initialize ORT (don't register providers globally - do per-session instead)
+    // Initialize ORT
     ort::init().with_name("chatterbox").commit()?;
 
     let build_session = |path: &PathBuf| -> Result<Session> {
-        let mut session_builder = Session::builder()?;
+        let session_builder = Session::builder()?;
 
-        #[cfg(feature = "directml")]
-        if let Device::DirectML(_) = config.device {
-            session_builder = session_builder
-                .with_execution_providers([DirectMLExecutionProvider::default().build()])?;
+        // Build execution providers based on device config
+        match config.device {
+            Device::Cpu => {
+                // CPU only - no additional providers
+                Ok(session_builder.commit_from_file(path)?)
+            }
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_device_id) => {
+                // CUDA explicitly requested
+                let builder = session_builder
+                    .with_execution_providers([CUDAExecutionProvider::default().build()])?;
+                Ok(builder.commit_from_file(path)?)
+            }
+            #[cfg(feature = "directml")]
+            Device::DirectML(_device_id) => {
+                // DirectML explicitly requested
+                let builder = session_builder
+                    .with_execution_providers([DirectMLExecutionProvider::default().build()])?;
+                Ok(builder.commit_from_file(path)?)
+            }
+            Device::Auto => {
+                // Try CUDA first (cuDNN auto-download should work now)
+                // DirectML disabled in Auto due to LayerNormalization compatibility issues
+                #[cfg(feature = "cuda")]
+                {
+                    let builder = session_builder
+                        .with_execution_providers([CUDAExecutionProvider::default().build()])?;
+                    return Ok(builder.commit_from_file(path)?);
+                }
+
+                // Fall back to CPU if no CUDA
+                #[cfg(not(feature = "cuda"))]
+                {
+                    Ok(session_builder.commit_from_file(path)?)
+                }
+            }
         }
-
-        #[cfg(feature = "cuda")]
-        if let Device::Cuda(_) = config.device {
-            session_builder = session_builder
-                .with_execution_providers([CUDAExecutionProvider::default().build()])?;
-        }
-
-        Ok(session_builder.commit_from_file(path)?)
     };
 
     Ok(ModelSessions {

@@ -37,7 +37,21 @@ impl ChatterboxTTS {
     /// Create a new ChatterboxTTS instance.
     ///
     /// Downloads models if not cached, initializes ONNX sessions.
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(mut config: Config) -> Result<Self> {
+        // Force FP32 for GPU execution (both DirectML and CUDA)
+        // FP16 can cause cuDNN failures on older GPUs (Pascal architecture like GTX 1050)
+        {
+            use crate::config::Device;
+            let is_gpu = matches!(
+                config.device,
+                Device::DirectML(_) | Device::Cuda(_) | Device::Auto
+            );
+            if is_gpu && config.dtype == crate::config::ModelDtype::Fp16 {
+                println!("Note: GPU selected, switching to FP32 models for compatibility with older GPUs");
+                config.dtype = crate::config::ModelDtype::Fp32;
+            }
+        }
+
         println!("Downloading models (dtype={:?})...", config.dtype);
         let paths = download_models(config.dtype)?;
 

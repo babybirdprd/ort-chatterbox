@@ -91,6 +91,31 @@ fn main() {
         }
     }
 
+    // Add ort.pyke.io cache directory (where ort crate downloads ONNX Runtime)
+    if let Some(local_app_data) = dirs::data_local_dir() {
+        let ort_cache = local_app_data.join("ort.pyke.io").join("dfbin");
+        #[cfg(target_os = "windows")]
+        let platform = "x86_64-pc-windows-msvc";
+        #[cfg(target_os = "linux")]
+        let platform = "x86_64-unknown-linux-gnu";
+        #[cfg(target_os = "macos")]
+        let platform = "x86_64-apple-darwin";
+
+        let platform_cache = ort_cache.join(platform);
+        if platform_cache.exists() {
+            // Find the most recent version directory
+            if let Ok(entries) = fs::read_dir(&platform_cache) {
+                for entry in entries.flatten() {
+                    let lib_dir = entry.path().join("onnxruntime").join("lib");
+                    if lib_dir.exists() {
+                        println!("cargo:warning=Found ORT cache: {}", lib_dir.display());
+                        search_paths.push(lib_dir);
+                    }
+                }
+            }
+        }
+    }
+
     // Copy ONNX Runtime libs
     for search_path in &search_paths {
         copy_libs_from_dir(search_path, &target_bin_dir, ort_patterns);
@@ -334,19 +359,75 @@ fn extract_tar_xz(
 }
 
 fn download_file(url: &str, dest: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let response = ureq::get(url).call()?;
+    const MAX_RETRIES: u32 = 3;
+
+    for attempt in 1..=MAX_RETRIES {
+        println!(
+            "cargo:warning=Download attempt {}/{} for {}",
+            attempt, MAX_RETRIES, url
+        );
+
+        // Delete any existing incomplete file
+        if dest.exists() {
+            let _ = fs::remove_file(dest);
+        }
+
+        match download_file_once(url, dest) {
+            Ok(()) => {
+                // Verify the file exists and has content
+                if let Ok(metadata) = fs::metadata(dest) {
+                    if metadata.len() > 1000 {
+                        println!("cargo:warning=Download verified: {} bytes", metadata.len());
+                        return Ok(());
+                    } else {
+                        println!(
+                            "cargo:warning=Downloaded file too small ({} bytes), retrying...",
+                            metadata.len()
+                        );
+                        let _ = fs::remove_file(dest);
+                    }
+                } else {
+                    println!("cargo:warning=Downloaded file not found, retrying...");
+                }
+            }
+            Err(e) => {
+                println!("cargo:warning=Download attempt {} failed: {}", attempt, e);
+                let _ = fs::remove_file(dest);
+                if attempt < MAX_RETRIES {
+                    println!("cargo:warning=Retrying in 2 seconds...");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+        }
+    }
+
+    Err(format!("Failed to download {} after {} attempts", url, MAX_RETRIES).into())
+}
+
+fn download_file_once(url: &str, dest: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(600)) // 10 min timeout for large files
+        .call()?;
 
     let total_size = response
         .header("content-length")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    println!("cargo:warning=Downloading {} bytes...", total_size);
+    if total_size == 0 {
+        return Err("Server didn't provide content-length".into());
+    }
+
+    println!(
+        "cargo:warning=Downloading {} MB...",
+        total_size / 1024 / 1024
+    );
 
     let mut file = File::create(dest)?;
     let mut reader = response.into_reader();
-    let mut buffer = [0u8; 8192];
+    let mut buffer = [0u8; 65536]; // 64KB buffer for faster downloads
     let mut downloaded = 0u64;
+    let mut last_progress = 0u64;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -356,17 +437,33 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<(), Box<dyn std::error::Er
         file.write_all(&buffer[..bytes_read])?;
         downloaded += bytes_read as u64;
 
-        // Progress every 50MB
-        if downloaded % (50 * 1024 * 1024) < 8192 {
+        // Progress every 25MB
+        if downloaded - last_progress >= 25 * 1024 * 1024 {
+            last_progress = downloaded;
             println!(
-                "cargo:warning=Downloaded {} / {} MB",
+                "cargo:warning=Progress: {} / {} MB ({:.0}%)",
                 downloaded / 1024 / 1024,
-                total_size / 1024 / 1024
+                total_size / 1024 / 1024,
+                (downloaded as f64 / total_size as f64) * 100.0
             );
         }
     }
 
-    println!("cargo:warning=Download complete!");
+    file.sync_all()?; // Ensure all data is written to disk
+
+    // Verify download completed
+    if downloaded != total_size {
+        return Err(format!(
+            "Incomplete download: got {} bytes, expected {} bytes",
+            downloaded, total_size
+        )
+        .into());
+    }
+
+    println!(
+        "cargo:warning=Download complete: {} MB",
+        downloaded / 1024 / 1024
+    );
     Ok(())
 }
 

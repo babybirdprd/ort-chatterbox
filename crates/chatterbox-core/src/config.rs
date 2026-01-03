@@ -14,23 +14,14 @@ pub enum Device {
     /// DirectML GPU inference (Windows only, no CUDA needed)
     #[cfg(feature = "directml")]
     DirectML(u32),
+    /// Auto-select: Try CUDA first, fall back to DirectML, then CPU
+    Auto,
 }
 
 impl Default for Device {
     fn default() -> Self {
-        // Prefer DirectML on Windows (no cuDNN needed), then CUDA, then CPU
-        #[cfg(feature = "directml")]
-        {
-            Device::DirectML(0)
-        }
-        #[cfg(all(feature = "cuda", not(feature = "directml")))]
-        {
-            Device::Cuda(0)
-        }
-        #[cfg(not(any(feature = "cuda", feature = "directml")))]
-        {
-            Device::Cpu
-        }
+        // Default to Auto which tries CUDA → DirectML → CPU
+        Device::Auto
     }
 }
 

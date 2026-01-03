@@ -66,10 +66,14 @@ pub fn spawn_worker() -> anyhow::Result<(
         });
 
         // Initialize TTS
-        let config = Config::builder().device(Device::default()).build();
+        let device = Device::default();
+        println!("[Worker] Selected device: {:?}", device);
+        let config = Config::builder().device(device).build();
+        println!("[Worker] Config built, creating ChatterboxTTS...");
 
         let mut tts = match ChatterboxTTS::new(config) {
             Ok(tts) => {
+                println!("[Worker] TTS engine initialized successfully!");
                 let _ = event_tx.send(WorkerEvent::Ready);
                 tts
             }
@@ -112,8 +116,15 @@ pub fn spawn_worker() -> anyhow::Result<(
                     temperature,
                     max_tokens,
                 } => {
-                    println!("[Worker] Starting generation for voice: {}", voice_id);
-                    println!("[Worker] Text: {}", text);
+                    println!("[Worker] ========================================");
+                    println!("[Worker] Starting generation");
+                    println!("[Worker] Voice ID: {}", voice_id);
+                    println!("[Worker] Text: \"{}\"", text);
+                    println!(
+                        "[Worker] Temperature: {}, Max tokens: {}",
+                        temperature, max_tokens
+                    );
+                    println!("[Worker] ========================================");
 
                     let opts = GenerateOptions {
                         temperature,
@@ -124,6 +135,7 @@ pub fn spawn_worker() -> anyhow::Result<(
                     let event_tx_clone = event_tx.clone();
                     let mut token_count = 0;
 
+                    println!("[Worker] Calling tts.generate_streaming()...");
                     match tts.generate_streaming(&text, &voice_id, opts, |event| {
                         if let StreamEvent::Token(_) = event {
                             token_count += 1;
